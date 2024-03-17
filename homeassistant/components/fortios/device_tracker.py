@@ -2,7 +2,6 @@
 
 This component is part of the device_tracker platform.
 """
-
 from __future__ import annotations
 
 import logging
@@ -55,7 +54,8 @@ def get_scanner(hass: HomeAssistant, config: ConfigType) -> FortiOSDeviceScanner
     status_json = fgt.monitor("system/status", "")
 
     current_version = AwesomeVersion(status_json["version"])
-    minimum_version = AwesomeVersion("6.4.3")
+	"""only tested on FortiOS 6.0, even older versions may be supported"""
+    minimum_version = AwesomeVersion("6.0")
     if current_version < minimum_version:
         _LOGGER.error(
             "Unsupported FortiOS version: %s. Version %s and newer are supported",
@@ -77,12 +77,22 @@ class FortiOSDeviceScanner(DeviceScanner):
         self._fgt = fgt
 
     def update(self):
+        """get current version"""
+        status_json = self._fgt.monitor("system/status", "")
+
+        self._current_version = AwesomeVersion(status_json["version"])
+		"""the Fortigate API is different prior to 6.4.3, use slightly different methods to detect devices"""
+        legacy_version_cutoff = AwesomeVersion("6.4.3")
+
         """Update clients from the device."""
-        clients_json = self._fgt.monitor(
-            "user/device/query",
-            "",
-            parameters={"filter": "format=master_mac|hostname|is_online"},
-        )
+        if self._current_version < legacy_version_cutoff:
+            clients_json = self._fgt.monitor("user/device", "")
+        else:
+            clients_json = self._fgt.monitor(
+                "user/device/query",
+                "",
+                parameters={"filter": "format=master_mac|hostname|is_online"},
+            )
 
         self._clients_json = clients_json
 
@@ -91,12 +101,20 @@ class FortiOSDeviceScanner(DeviceScanner):
         if clients_json:
             try:
                 for client in clients_json["results"]:
-                    if (
-                        "is_online" in client
-                        and "master_mac" in client
-                        and client["is_online"]
-                    ):
-                        self._clients.append(client["master_mac"].upper())
+                    if self._current_version < legacy_version_cutoff:
+						"""in the legacy Fortigate API there is no is_online key, instead use the last_seen key"""
+                        if (
+                            int(client["last_seen"]) < 30
+                            and "master_mac" in client
+                        ):
+                            self._clients.append(client["master_mac"].upper())
+                    else:
+                        if (
+                            "is_online" in client
+                            and "master_mac" in client
+                            and client["is_online"]
+                        ):
+                            self._clients.append(client["master_mac"].upper())
             except KeyError as kex:
                 _LOGGER.error("Key not found in clients: %s", kex)
 
@@ -117,9 +135,13 @@ class FortiOSDeviceScanner(DeviceScanner):
 
         for client in data["results"]:
             if "master_mac" in client and client["master_mac"] == device:
-                if "hostname" in client:
-                    name = client["hostname"]
-                else:
+                try:
+                    if self._current_version < legacy_version_cutoff:
+						"""in the legacy Fortigate API there is no hostname key, instead there's a name key under the host key"""
+                        name = client["host"]["name"]
+                    else:
+                        name = client["hostname"]
+                except:
                     name = client["master_mac"].replace(":", "_")
                 return name
         return None
